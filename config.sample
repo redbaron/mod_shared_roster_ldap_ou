@@ -1,0 +1,22 @@
+{mod_shared_roster_ldap_ou,[                                                
+    {ldap_rootdn, ""},                                                      
+    {ldap_password, ""},                                                    
+    {ldap_servers, ["127.0.0.1"]},    % List of LDAP servers                
+    {ldap_port, 389},                                                       
+    {ldap_base, "dc=domain,dc=com"},
+     
+    %attributes to get username from (login)    
+    {ldap_uids,[{"uid","%u"}]},     
+
+    %filter to get users, do not put something like uid=* here, it is done autmatically
+    {ldap_filter, "(objectClass=posixAccount)"},
+
+    %attribute (one!) to get displayed user name from
+    {ldap_udescr,"cn"}, 
+
+     %group search filter (does not combilned with ldap_filter), right now only OU are supported                                                               
+    {ldap_gfilter,"(&(ou=*)(objectClass=gosaDepartment)(!(objectClass=dcObject)))"},
+   
+     %attribute name which stores group displayed name
+    {ldap_gdescr,"description"}                                                                                                
+   ]},      
