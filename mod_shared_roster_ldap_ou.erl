@@ -25,7 +25,8 @@
 -export([init/1, terminate/2, handle_call/3, handle_cast/2,
          handle_info/2, code_change/3]).
 %% API
--export([start_link/2,get_user_roster/2]).
+-export([start_link/2,get_user_roster/2,process_item/2,in_subscription/6,out_subscription/4,
+        get_subscription_lists/3,get_jid_info/4]).
 
 -include("ejabberd.hrl").
 -include("eldap/eldap.hrl").
@@ -88,16 +89,16 @@ init([Host, Opts]) ->
     State = parse_options(Host, Opts),
     ejabberd_hooks:add(roster_get, Host,
                ?MODULE, get_user_roster, 70),
-    %ejabberd_hooks:add(roster_in_subscription, Host,
-    %               ?MODULE, in_subscription, 30),
-    %ejabberd_hooks:add(roster_out_subscription, Host,
-    %               ?MODULE, out_subscription, 30),
-    %ejabberd_hooks:add(roster_get_subscription_lists, Host,
-    %           ?MODULE, get_subscription_lists, 70),
-    %ejabberd_hooks:add(roster_get_jid_info, Host,
-    %               ?MODULE, get_jid_info, 70),
-    %ejabberd_hooks:add(roster_process_item, Host,
-    %               ?MODULE, process_item, 50),
+    ejabberd_hooks:add(roster_in_subscription, Host,
+                   ?MODULE, in_subscription, 30),
+    ejabberd_hooks:add(roster_out_subscription, Host,
+                   ?MODULE, out_subscription, 30),
+    ejabberd_hooks:add(roster_get_subscription_lists, Host,
+               ?MODULE, get_subscription_lists, 70),
+    ejabberd_hooks:add(roster_get_jid_info, Host,
+                   ?MODULE, get_jid_info, 70),
+    ejabberd_hooks:add(roster_process_item, Host,
+                   ?MODULE, process_item, 50),
     eldap:start_link(State#state.eldap_id,
         State#state.servers,
         State#state.port,
@@ -110,16 +111,16 @@ terminate(_Reason, State) ->
     Host = State#state.host,
     ejabberd_hooks:delete(roster_get, Host,
               ?MODULE, get_user_roster, 70),
-    %ejabberd_hooks:delete(roster_in_subscription, Host,
-    %              ?MODULE, in_subscription, 30),
-    %ejabberd_hooks:delete(roster_out_subscription, Host,
-    %              ?MODULE, out_subscription, 30),
-    %ejabberd_hooks:delete(roster_get_subscription_lists, Host,
-    %              ?MODULE, get_subscription_lists, 70),
-    %ejabberd_hooks:delete(roster_get_jid_info, Host,
-    %              ?MODULE, get_jid_info, 70),
-    %ejabberd_hooks:delete(roster_process_item, Host,
-    %          ?MODULE, process_item, 50).
+    ejabberd_hooks:delete(roster_in_subscription, Host,
+                  ?MODULE, in_subscription, 30),
+    ejabberd_hooks:delete(roster_out_subscription, Host,
+                  ?MODULE, out_subscription, 30),
+    ejabberd_hooks:delete(roster_get_subscription_lists, Host,
+                  ?MODULE, get_subscription_lists, 70),
+    ejabberd_hooks:delete(roster_get_jid_info, Host,
+                  ?MODULE, get_jid_info, 70),
+    ejabberd_hooks:delete(roster_process_item, Host,
+              ?MODULE, process_item, 50),
     ok.
 
 % almost everyithing is copied from mod_shared_roster
@@ -167,6 +168,152 @@ get_user_roster(Items, US) ->
           {{U1, S1}, GroupNames} <- dict:to_list(SRUsersRest)],
     SRItems ++ NewItems1.
 
+get_jid_info({Subscription, Groups}, User, Server, JID) ->
+    LUser = jlib:nodeprep(User),
+    LServer = jlib:nameprep(Server),
+    US = {LUser, LServer},
+    {U1, S1, _} = jlib:jid_tolower(JID),
+    US1 = {U1, S1},
+    DisplayedGroups = get_user_displayed_groups(US),
+    SRUsers = 
+    lists:foldl(
+      fun(Group, Acc1) ->
+          lists:foldl(
+            fun(User1, Acc2) ->
+                dict:append(
+                  User1, Group#roster_entry.descr, Acc2)
+            end, Acc1, get_group_users_plain(LServer, Group))
+      end, dict:new(), DisplayedGroups),
+    case dict:find(US1, SRUsers) of
+    {ok, GroupNames} ->
+        NewGroups = if
+                Groups == [] -> GroupNames;
+                true -> Groups
+            end,
+        {both, NewGroups};
+    error ->
+        {Subscription, Groups}
+    end.
+
+%copied from mod_shared_roster
+in_subscription(Acc, User, Server, JID, Type, _Reason) ->
+    process_subscription(in, User, Server, JID, Type, Acc).
+    
+%copied from mod_shared_roster    
+out_subscription(UserFrom, ServerFrom, JIDTo, unsubscribed) ->
+    Mod = get_roster_mod(ServerFrom),
+
+    %% Remove pending out subscription
+    #jid{luser = UserTo, lserver = ServerTo} = JIDTo,
+    JIDFrom = jlib:make_jid(UserFrom, UserTo, ""),
+    Mod:out_subscription(UserTo, ServerTo, JIDFrom, unsubscribe),
+
+    %% Remove pending in subscription
+    Mod:in_subscription(aaaa, UserFrom, ServerFrom, JIDTo, unsubscribe, ""),
+
+    process_subscription(out, UserFrom, ServerFrom, JIDTo, unsubscribed, false);
+
+%copied from mod_shared_roster    
+out_subscription(User, Server, JID, Type) ->
+    process_subscription(out, User, Server, JID, Type, false).
+
+%copied from mod_shared_roster
+process_subscription(Direction, User, Server, JID, _Type, Acc) ->
+    LUser = jlib:nodeprep(User),
+    LServer = jlib:nameprep(Server),
+    US = {LUser, LServer},
+    {U1, S1, _} = jlib:jid_tolower(jlib:jid_remove_resource(JID)),
+    US1 = {U1, S1},
+    DisplayedGroups = get_user_displayed_groups(US),
+    SRUsers =
+    lists:usort(
+      lists:flatmap(
+        fun(Group) ->
+            get_group_users_plain(LServer, Group)
+        end, DisplayedGroups)),
+    case lists:member(US1, SRUsers) of
+    true ->
+        case Direction of
+        in ->
+            {stop, false};
+        out ->
+            stop
+        end;
+    false ->
+        Acc
+    end.
+
+%copied from mod_shared_roster
+get_subscription_lists({F, T}, User, Server) ->
+    LUser = jlib:nodeprep(User),
+    LServer = jlib:nameprep(Server),
+    US = {LUser, LServer},
+    DisplayedGroups = get_user_displayed_groups(US),
+    SRUsers =
+    lists:usort(
+      lists:flatmap(
+        fun(Group) ->
+            get_group_users_plain(LServer, Group)
+        end, DisplayedGroups)),
+    SRJIDs = [{U1, S1, ""} || {U1, S1} <- SRUsers],
+    {lists:usort(SRJIDs ++ F), lists:usort(SRJIDs ++ T)}.
+
+%% This function rewrites the roster entries when moving or renaming
+%% them in the user contact list.
+%% copied from mod_shared_roster
+process_item(RosterItem, _Host) ->
+    USFrom = {UserFrom, ServerFrom} = RosterItem#roster.us,
+    {UserTo, ServerTo, ResourceTo} = RosterItem#roster.jid,
+    NameTo = RosterItem#roster.name,
+    USTo = {UserTo, ServerTo},
+    DisplayedGroups = get_user_displayed_groups(USFrom),
+    CommonGroups = lists:filter(fun(Group) ->
+                    lists:member(USTo,get_group_users_plain(ServerTo,Group))
+                end, DisplayedGroups),
+    CommonGroupNames = lists:map(fun(Group) ->
+                       Group#roster_entry.descr
+                   end, CommonGroups),
+    case CommonGroupNames of
+    [] -> RosterItem;
+    %% Roster item cannot be removed: We simply reset the original groups:
+    _ when RosterItem#roster.subscription == remove ->
+        RosterItem#roster{subscription = both, ask = none,
+                  groups=[CommonGroupNames]};
+    %% Both users have at least a common shared group,
+    %% So each user can see the other
+    _ ->
+        %% Check if the list of groups of the new roster item
+        %% include at least a new one
+        case lists:subtract(RosterItem#roster.groups, CommonGroupNames) of
+                %% If it doesn't, then remove this user from any
+                %% existing roster groups.
+        [] ->
+                    %% Remove pending subscription by setting it
+                    %% unsubscribed.
+                    Mod = get_roster_mod(ServerFrom),
+
+                    %% Remove pending out subscription
+                    Mod:out_subscription(UserTo, ServerTo,
+                                         jlib:make_jid(UserFrom, ServerFrom, ""),
+                                         unsubscribe),
+
+                    %% Remove pending in subscription
+                    Mod:in_subscription(aaaa, UserFrom, ServerFrom,
+                                        jlib:make_jid(UserTo, ServerTo, ""),
+                                        unsubscribe, ""),
+
+                    %% But we're still subscribed, so respond as such.
+            RosterItem#roster{subscription = both, ask = none};
+        %% If so, it means the user wants to add that contact
+        %% to his personal roster
+        PersonalGroups ->
+            %% Store roster items in From and To rosters
+            set_new_rosteritems(UserFrom, ServerFrom,
+                    UserTo, ServerTo, ResourceTo, NameTo,
+                    PersonalGroups)
+        end
+    end.
+
 %% @doc Get the list of groups that are displayed to this user
 %% searches according to group_filter settings and uses gdescr attr to 
 %% retrieve name, if it's not possible then tries to extract name
@@ -177,6 +324,14 @@ get_user_displayed_groups({User, Host}) ->
 %% @doc get members of group
 get_group_users(Host, Group) ->
     make_request(Host, {get_group_users, Group}, []).
+
+%% returns plain usernames list, not roster_entry's lists
+get_group_users_plain(Host,Group) ->
+    lists:map(fun(#roster_entry{name=UserName} = _User) ->
+            UserName
+        end,
+        get_group_users(Host, Group)).
+
 
 
 %%====================================================================
@@ -377,8 +532,72 @@ extract_user_descr(Username,Attrs,DescrAttr) ->
         {value,{_,Descr},_} -> Descr;
         false -> Username
     end.
-
     
+%% Get the roster module for Server.
+%% copied from mod_shared_roster
+get_roster_mod(Server) ->
+    case lists:member(mod_roster_odbc,
+                      gen_mod:loaded_modules(Server)) of
+        true -> mod_roster_odbc;
+        false -> mod_roster
+    end.
+    
+%% copied from mod_shared_roster    
+set_new_rosteritems(UserFrom, ServerFrom,
+            UserTo, ServerTo, ResourceTo, NameTo, GroupsFrom) ->
+    Mod = get_roster_mod(ServerFrom),
+
+    RIFrom = build_roster_record(UserFrom, ServerFrom,
+                 UserTo, ServerTo, NameTo, GroupsFrom),
+    set_item(UserFrom, ServerFrom, ResourceTo, RIFrom),
+    JIDTo = jlib:make_jid(UserTo, ServerTo, ""),
+
+    JIDFrom = jlib:make_jid(UserFrom, ServerFrom, ""),
+    RITo = build_roster_record(UserTo, ServerTo,
+                   UserFrom, ServerFrom, UserFrom,[]),
+    set_item(UserTo, ServerTo, "", RITo),
+
+    %% From requests
+    Mod:out_subscription(UserFrom, ServerFrom, JIDTo, subscribe),
+    Mod:in_subscription(aaa, UserTo, ServerTo, JIDFrom, subscribe, ""),
+
+    %% To accepts
+    Mod:out_subscription(UserTo, ServerTo, JIDFrom, subscribed),
+    Mod:in_subscription(aaa, UserFrom, ServerFrom, JIDTo, subscribed, ""),
+
+    %% To requests
+    Mod:out_subscription(UserTo, ServerTo, JIDFrom, subscribe),
+    Mod:in_subscription(aaa, UserFrom, ServerFrom, JIDTo, subscribe, ""),
+
+    %% From accepts
+    Mod:out_subscription(UserFrom, ServerFrom, JIDTo, subscribed),
+    Mod:in_subscription(aaa, UserTo, ServerTo, JIDFrom, subscribed, ""),
+
+    RIFrom.
+
+%% copied from mod_shared_roster    
+build_roster_record(User1, Server1, User2, Server2, Name2, Groups) ->
+    USR2 = {User2, Server2, ""},
+    #roster{usj = {User1, Server1, USR2},
+        us = {User1, Server1},
+        jid = USR2,
+        name = Name2,
+        subscription = both,
+        ask = none,
+        groups = Groups
+       }.
+
+set_item(User, Server, Resource, Item) ->
+    ResIQ = #iq{type = set, xmlns = ?NS_ROSTER,
+        id = "push" ++ randoms:get_string(),
+        sub_el = [{xmlelement, "query",
+               [{"xmlns", ?NS_ROSTER}],
+               [mod_roster:item_to_xml(Item)]}]},
+    ejabberd_router:route(
+      jlib:make_jid(User, Server, Resource),
+      jlib:make_jid("", Server, ""),
+      jlib:iq_to_xml(ResIQ)).
+     
     
 make_request(Host, Request, Fallback) ->
     Proc = gen_mod:get_module_proc(Host, ?MODULE),
